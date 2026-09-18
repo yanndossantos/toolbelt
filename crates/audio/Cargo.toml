@@ -1,0 +1,22 @@
+[package]
+name = "toolbelt-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+windows-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Media_Audio",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Threading",
+]

@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/ddc", "crates/audio", "crates/capture", "probe", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Tauri 2 exige au moins 1.77.
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Version épinglée volontairement : les signatures de windows-rs bougent
+# entre versions mineures. Ne pas passer en "0.58" -> "*" sans relire audio/.
+windows = "0.58"
+windows-core = "0.58"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

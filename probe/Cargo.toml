@@ -1,0 +1,14 @@
+[package]
+name = "toolbelt-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
+
+[dependencies]
+toolbelt-ddc = { path = "../crates/ddc" }
+toolbelt-audio = { path = "../crates/audio" }
+toolbelt-capture = { path = "../crates/capture" }

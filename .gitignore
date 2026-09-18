@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# Local agent and editor settings
+.claude/settings.local.json
+.vscode/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# OS metadata
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,10 @@
+[package]
+name = "toolbelt-ddc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Aucune dépendance externe : les 4 fonctions Dxva2 et les 2 fonctions user32
+# dont on a besoin sont déclarées à la main dans sys.rs. Ça évite de dépendre
+# des signatures de windows-rs, qui changent entre versions mineures.
+[dependencies]

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>Capture enregistrée</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    color: #e8eaed;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* La marge réserve la place de l'ombre portée. Elle doit valoir au moins
+     le rayon de flou, décalage vertical compris, sinon la fenêtre tranche le
+     dégradé net sur ses bords — `overflow: hidden` ne pardonne pas. Elle est
+     comptée dans TOAST_SHADOW côté Rust, qui l'ajoute à la taille de la
+     fenêtre et la retranche du positionnement pour que la carte visible
+     tombe où on veut. */
+  #card {
+    margin: 18px;
+    padding: 11px 14px;
+    border-radius: 10px;
+    background: #1f2126;
+    border: 1px solid #34363d;
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  /* `min-width: 0` sans quoi un chemin sans espace refuserait de rétrécir et
+     pousserait le bouton hors de la carte. */
+  #text { flex: 1; min-width: 0; }
+
+  #open {
+    flex: none;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+    background: #24262b;
+    color: #e8eaed;
+    font: inherit;
+    font-size: 11px;
+    padding: 6px 11px;
+    cursor: default;
+  }
+  #open:hover { background: #34363d; }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+  }
+  #card.arriving { animation: rise 140ms ease-out; }
+
+  /* Sortie symétrique de l'entrée. `forwards` retient l'état final : sans
+     lui la carte réapparaîtrait pleinement opaque le temps que Rust masque
+     la fenêtre, et on verrait un clignotement. */
+  @keyframes fall {
+    to { opacity: 0; transform: translateY(6px); }
+  }
+  #card.leaving { animation: fall 180ms ease-in forwards; }
+
+  .lead { font-size: 11px; color: #9aa0a6; }
+  .name {
+    margin-top: 3px;
+    font-size: 13px;
+    font-weight: 600;
+    word-break: break-all;
+  }
+  .dir {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #9aa0a6;
+    word-break: break-all;
+  }
+</style>
+</head>
+<body>
+  <div id="card">
+    <div id="text">
+      <div class="lead">Enregistré sous</div>
+      <div class="name" id="name"></div>
+      <div class="dir" id="dir"></div>
+    </div>
+    <button id="open" title="Ouvrir le dossier des captures">Ouvrir</button>
+  </div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const card = document.getElementById("card");
+
+/// Durée d'affichage pleine. Assez pour lire un nom de fichier, assez court
+/// pour ne pas traîner devant ce qu'on est reparti faire.
+const LINGER = 2600;
+/// Doit rester aligné sur la durée de l'animation `fall` : la fenêtre est
+/// masquée à la fin, pas avant, sinon le fondu est coupé.
+const FADE = 180;
+
+let linger = null;
+let fade = null;
+
+/// Lance le fondu de sortie, puis masque la fenêtre une fois terminé.
+function dismiss() {
+  card.classList.add("leaving");
+  // Masquer seulement à la fin du fondu : `hide_toast` fait disparaître la
+  // fenêtre instantanément, l'appeler tout de suite reviendrait à n'avoir
+  // aucune animation de sortie.
+  fade = setTimeout(() => invoke("hide_toast").catch(console.error), FADE);
+}
+
+/// (Re)part d'un délai d'affichage plein.
+function armDismiss() {
+  clearTimeout(linger);
+  clearTimeout(fade);
+  linger = setTimeout(dismiss, LINGER);
+}
+
+/// Suspend la disparition et rattrape une carte déjà en train de s'effacer.
+function holdOpen() {
+  clearTimeout(linger);
+  clearTimeout(fade);
+  card.classList.remove("leaving");
+}
+
+/// Appelée depuis Rust par `eval`, juste avant l'affichage de la fenêtre.
+///
+/// Pas d'écouteur d'événement : l'API d'événements de Tauri exige une
+/// capacité ACL que ce projet ne déclare pas, et `listen` n'y rappelle
+/// jamais. La confirmation restait vide et, comme c'est ici qu'est armé le
+/// minuteur, ne s'effaçait plus.
+window.showSaved = function (payload) {
+  document.getElementById("name").textContent = payload.name;
+  document.getElementById("dir").textContent = payload.dir;
+
+  // Deux captures rapprochées : la seconde repart d'un délai plein plutôt
+  // que d'hériter du reliquat de la première.
+  holdOpen();
+
+  // La fenêtre n'est jamais détruite, seulement masquée puis réaffichée :
+  // l'animation, jouée une fois au chargement, doit être réamorcée. Retirer
+  // la classe, forcer un recalcul de style, la remettre — sans cette
+  // lecture, le navigateur regroupe les deux changements et rien ne repart.
+  card.classList.remove("arriving");
+  void card.offsetWidth;
+  card.classList.add("arriving");
+
+  armDismiss();
+};
+
+// Le survol suspend le compte à rebours. Sans ça le bouton serait souvent
+// hors d'atteinte : 2,6 s suffisent à lire une ligne, pas à remarquer la
+// carte du coin de l'œil puis à y amener la souris.
+card.addEventListener("mouseenter", holdOpen);
+card.addEventListener("mouseleave", armDismiss);
+
+document.getElementById("open").addEventListener("click", () => {
+  invoke("open_screenshots_dir").catch(console.error);
+  // Le dossier est à l'écran, la confirmation n'a plus rien à dire.
+  holdOpen();
+  dismiss();
+});
+</script>
+</body>
+</html>

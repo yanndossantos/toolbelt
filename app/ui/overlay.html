@@ -1,0 +1,878 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<title>Capture</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    cursor: crosshair;
+    /* La fenêtre est transparente et le reste : l'assombrissement est porté
+       par #dim ou par l'ombre de #sel, jamais par le body. Un fond ici
+       s'ajouterait à l'ombre et assombrirait aussi la zone sélectionnée. */
+    background: transparent;
+    user-select: none;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+
+  /* Image figée prise avant l'affichage de l'overlay. Elle remplace l'écran
+     vivant, notamment quand la capture porte sur une vidéo. */
+  #frozen {
+    position: fixed;
+    display: none;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Assombrissement plein écran, tant qu'aucun rectangle n'existe. */
+  #dim {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.35);
+    z-index: 1;
+  }
+
+  /* Fondu à l'ouverture. Windows anime normalement l'apparition d'une
+     fenêtre en la déployant depuis son centre — sur un overlay qui couvre
+     deux écrans, ce centre tombe à la jointure et l'effet arrive de travers
+     sur chacun. L'animation système est coupée côté Rust
+     (DWMWA_TRANSITIONS_FORCEDISABLED) et remplacée par ce fondu, qui couvre
+     toute la surface d'un coup. */
+  @keyframes dim-in { from { background-color: rgba(0, 0, 0, 0); } }
+  #dim.arriving { animation: dim-in 110ms ease-out; }
+
+  #sel {
+    position: fixed;
+    display: none;
+    border: 1px solid #fff;
+    background: transparent;
+    /* Dès qu'un rectangle existe, #dim est retiré et c'est cette ombre qui
+       assombrit tout sauf lui. La sélection s'affiche donc à sa luminosité
+       réelle, telle qu'elle sera enregistrée. */
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+    z-index: 3;
+  }
+  body.adjust #sel { cursor: move; }
+
+  /* Poignées de redimensionnement, visibles une fois le tracé terminé. */
+  .h {
+    position: absolute;
+    width: 10px; height: 10px;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.55);
+    border-radius: 2px;
+    display: none;
+  }
+  body.adjust .h { display: block; }
+  .h.nw { left: -6px;  top: -6px;    cursor: nwse-resize; }
+  .h.n  { left: calc(50% - 5px); top: -6px; cursor: ns-resize; }
+  .h.ne { right: -6px; top: -6px;    cursor: nesw-resize; }
+  .h.w  { left: -6px;  top: calc(50% - 5px); cursor: ew-resize; }
+  .h.e  { right: -6px; top: calc(50% - 5px); cursor: ew-resize; }
+  .h.sw { left: -6px;  bottom: -6px; cursor: nesw-resize; }
+  .h.s  { left: calc(50% - 5px); bottom: -6px; cursor: ns-resize; }
+  .h.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+
+  #size {
+    position: fixed;
+    display: none;
+    padding: 3px 7px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  /* Barre d'actions et croix : positionnées en JS sur les coins du
+     rectangle, pas sur ceux de l'écran. L'overlay fait la largeur du bureau
+     virtuel — un coin d'écran peut être à des milliers de pixels de la
+     sélection. */
+  #tools, #close {
+    position: fixed;
+    display: none;
+    cursor: default;
+  }
+
+  #preview {
+    position: fixed;
+    display: none;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  #tools {
+    display: none;
+    align-items: center;
+    gap: 4px;
+    max-width: calc(100vw - 16px);
+    flex-wrap: wrap;
+    padding: 5px;
+    border-radius: 7px;
+    background: #24262b;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 5;
+  }
+  body.adjust #tools { display: flex; }
+  #tools .tool-group, #tools .action-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  #tools .tool-group { flex-wrap: wrap; }
+  #tools .action-group {
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid rgba(255, 255, 255, 0.28);
+  }
+
+  #tools button, #tools select, #tools input {
+    box-sizing: border-box;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 4px;
+    background: #34363d;
+    color: #e8eaed;
+    font: inherit;
+    font-size: 12px;
+  }
+  #tools button { min-width: 28px; padding: 3px 7px; cursor: default; }
+  #tools button[data-tool], #tools button.icon-button {
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    line-height: 1;
+  }
+  .tool-icon {
+    display: block;
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .tool-icon.fill { fill: currentColor; stroke: none; }
+  #tools button:hover, #tools select:hover { background: #454850; }
+  #tools button.active { background: #1769aa; border-color: #65b7ee; }
+  #tools input[type="color"] { width: 30px; padding: 2px; }
+  #tools input[type="number"] {
+    width: 30px;
+    padding: 3px 0;
+    -moz-appearance: textfield;
+  }
+  #tools input[type="number"]::-webkit-inner-spin-button,
+  #tools input[type="number"]::-webkit-outer-spin-button {
+    margin: 0;
+    -webkit-appearance: none;
+  }
+  #tools .setting {
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 4px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 4px;
+    background: #34363d;
+  }
+  #tools .setting-icon {
+    width: 16px;
+    height: 16px;
+    color: #c5c8ce;
+    pointer-events: none;
+  }
+  #tools .setting input { border: 0; padding-left: 0; padding-right: 0; background: transparent; text-align: center; }
+  #tools .setting:focus-within, #tools .setting:hover { background: #454850; }
+  #tools .divider { width: 1px; height: 22px; background: rgba(255,255,255,.18); margin: 0 2px; }
+
+  #textEditor {
+    position: fixed;
+    display: none;
+    z-index: 6;
+    min-width: 120px;
+    padding: 4px 6px;
+    border: 1px solid #65b7ee;
+    border-radius: 3px;
+    outline: none;
+    background: rgba(20, 22, 26, .9);
+    color: #fff;
+    font: inherit;
+  }
+  #tools button, #close {
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+    background: #24262b;
+    color: #e8eaed;
+    font: inherit;
+    font-size: 12px;
+    padding: 6px 12px;
+    cursor: default;
+  }
+  #tools button:hover, #close:hover { background: #34363d; }
+
+  /* Carrée et centrée. Le remplissage asymétrique d'un bouton la rendait
+     rectangulaire, et le glyphe ✕ ne repose pas sur sa ligne de base comme
+     une lettre : seul `place-items` le centre vraiment, horizontalement et
+     verticalement. */
+  #close {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    place-items: center;
+    font-size: 12px;
+    line-height: 1;
+    z-index: 6;
+  }
+  body.adjust #close { display: grid; }
+
+  /* Message d'échec uniquement. Le succès ne s'affiche plus ici : l'outil se
+     referme, et la confirmation part dans une fenêtre séparée qui ne bloque
+     pas la machine. Un échec, lui, doit rester devant les yeux — disparaître
+     en silence ferait croire à un enregistrement réussi.
+
+     Centré sur la sélection : centré sur la fenêtre, il tomberait à la
+     jointure des écrans. */
+  #msg {
+    position: fixed;
+    display: none;
+    transform: translate(-50%, -50%);
+    max-width: 560px;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background: #7f1d1d;
+    border: 1px solid #a33;
+    color: #e8eaed;
+    font-size: 13px;
+    line-height: 1.45;
+    text-align: center;
+    word-break: break-all;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <img id="frozen" alt="" />
+  <div id="dim"></div>
+  <canvas id="preview"></canvas>
+  <div id="sel">
+    <span class="h nw" data-dir="nw"></span>
+    <span class="h n"  data-dir="n"></span>
+    <span class="h ne" data-dir="ne"></span>
+    <span class="h w"  data-dir="w"></span>
+    <span class="h e"  data-dir="e"></span>
+    <span class="h sw" data-dir="sw"></span>
+    <span class="h s"  data-dir="s"></span>
+    <span class="h se" data-dir="se"></span>
+  </div>
+  <div id="size"></div>
+  <div id="tools">
+    <div class="tool-group">
+      <button data-tool="select" title="Déplacer la sélection" aria-label="Déplacer la sélection">
+        <svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 1v16M1 9h16M9 1 7 3M9 1l2 2M9 17l-2-2M9 17l2-2M1 9l2-2M1 9l2 2M17 9l-2-2M17 9l-2 2" /></svg>
+      </button>
+      <button data-tool="rect" title="Rectangle" aria-label="Rectangle"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><rect x="3" y="3" width="12" height="12" rx="1" /></svg></button>
+      <button data-tool="ellipse" title="Ovale" aria-label="Ovale"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="6" /></svg></button>
+      <button data-tool="arrow" title="Flèche" aria-label="Flèche"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 15 15 3M8 3h7v7" /></svg></button>
+      <button data-tool="freehand" title="Dessin libre" aria-label="Dessin libre"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 12c2-7 4 7 6 0s4 7 8-1" /></svg></button>
+      <button data-tool="text" title="Texte" aria-label="Texte"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 4h12M9 4v11" /></svg></button>
+      <span class="divider"></span>
+      <input id="color" type="color" value="#ff3b30" title="Couleur" />
+      <label class="setting" title="Épaisseur du trait (molette)">
+        <svg class="setting-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 4h14M2 9h14M2 14h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+        <input id="stroke" type="number" min="1" max="24" value="3" aria-label="Épaisseur du trait" />
+      </label>
+      <label class="setting" title="Taille du texte (molette)">
+        <svg class="setting-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 4h12M9 4v11M6 15h6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
+        <input id="fontSize" type="number" min="10" max="96" value="28" aria-label="Taille du texte" />
+      </label>
+      <span class="divider"></span>
+      <button id="undo" class="icon-button" title="Annuler" aria-label="Annuler"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M5 6H2l3-3M2 6a6 6 0 1 1 1 7" /></svg></button>
+      <button id="redo" class="icon-button" title="Rétablir" aria-label="Rétablir"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M13 6h3l-3-3M16 6a6 6 0 1 0-1 7" /></svg></button>
+      <button id="delete" class="icon-button" title="Supprimer" aria-label="Supprimer"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 5h12M7 5V3h4v2M5 5l1 10h6l1-10M8 8v4M10 8v4" /></svg></button>
+    </div>
+    <div class="action-group">
+      <button id="copy" class="icon-button" title="Copier dans le presse-papiers et enregistrer" aria-label="Copier dans le presse-papiers et enregistrer"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><rect x="6" y="6" width="9" height="9" rx="1" /><path d="M12 6V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2" /></svg></button>
+      <button id="save" class="icon-button" title="Enregistrer" aria-label="Enregistrer"><svg class="tool-icon" viewBox="0 0 18 18" aria-hidden="true"><path d="M3 3h9l3 3v9H3zM6 3v5h6V3M6 15v-4h6v4" /></svg></button>
+    </div>
+  </div>
+  <input id="textEditor" type="text" autocomplete="off" spellcheck="false" />
+  <button id="close" title="Fermer (Échap)">✕</button>
+  <div id="msg"></div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const frozen = document.getElementById("frozen");
+const dim = document.getElementById("dim");
+const sel = document.getElementById("sel");
+const size = document.getElementById("size");
+const tools = document.getElementById("tools");
+const closeBtn = document.getElementById("close");
+const msg = document.getElementById("msg");
+const preview = document.getElementById("preview");
+const previewCtx = preview.getContext("2d");
+const color = document.getElementById("color");
+const stroke = document.getElementById("stroke");
+const fontSize = document.getElementById("fontSize");
+const textEditor = document.getElementById("textEditor");
+
+/// "idle" : rien de tracé. "drag" : tracé en cours. "adjust" : rectangle
+/// posé, poignées et boutons visibles.
+let mode = "idle";
+let rect = { x: 0, y: 0, w: 0, h: 0 };
+let tool = "select";
+let annotations = [];
+let history = [];
+let redoHistory = [];
+let selectedAnnotation = -1;
+let previewImage = null;
+let previewRequest = 0;
+let frozenRequest = 0;
+let annotationGesture = null;
+let pendingText = null;
+/// Geste en cours : { kind, dir, ox, oy, orig }. `orig` est le rectangle au
+/// moment de l'appui — tout est recalculé depuis lui, jamais par
+/// accumulation, qui dériverait au fil des mousemove.
+let gesture = null;
+
+/// Écart entre le rectangle et les boutons.
+const GAP = 8;
+/// En deçà, un glisser est un clic : on considère que l'utilisateur renonce.
+const MIN = 2;
+
+function norm(l, t, r, b) {
+  return { x: Math.min(l, r), y: Math.min(t, b), w: Math.abs(r - l), h: Math.abs(b - t) };
+}
+
+function clamp(rc) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const x = Math.max(0, Math.min(rc.x, W));
+  const y = Math.max(0, Math.min(rc.y, H));
+  return { x, y, w: Math.min(rc.w, W - x), h: Math.min(rc.h, H - y) };
+}
+
+function drawAnnotations() {
+  if (!previewImage) return;
+  const sx = preview.width / Math.max(1, rect.w);
+  const sy = preview.height / Math.max(1, rect.h);
+  previewCtx.clearRect(0, 0, preview.width, preview.height);
+  previewCtx.drawImage(previewImage, 0, 0, preview.width, preview.height);
+  previewCtx.lineCap = "round";
+  previewCtx.lineJoin = "round";
+
+  const items = annotations.slice();
+  if (annotationGesture && annotationGesture.type !== "text") {
+    items.push({
+      type: annotationGesture.type,
+      points: annotationGesture.type === "freehand"
+        ? annotationGesture.points
+        : [annotationGesture.start, annotationGesture.current || annotationGesture.start],
+      color: color.value,
+      width: Number(stroke.value)
+    });
+  }
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const points = item.points || [];
+    previewCtx.strokeStyle = item.color;
+    previewCtx.fillStyle = item.color;
+    previewCtx.lineWidth = item.width * sx;
+    previewCtx.beginPath();
+    if (item.type === "freehand") {
+      if (points.length) {
+        previewCtx.moveTo(points[0].x * sx, points[0].y * sy);
+        for (const point of points.slice(1)) previewCtx.lineTo(point.x * sx, point.y * sy);
+        previewCtx.stroke();
+      }
+    } else if (item.type === "rect") {
+      const a = points[0], b = points[1];
+      previewCtx.strokeRect(a.x * sx, a.y * sy, (b.x - a.x) * sx, (b.y - a.y) * sy);
+    } else if (item.type === "ellipse") {
+      const a = points[0], b = points[1];
+      previewCtx.ellipse((a.x + b.x) * sx / 2, (a.y + b.y) * sy / 2,
+        Math.abs(b.x - a.x) * sx / 2, Math.abs(b.y - a.y) * sy / 2, 0, 0, Math.PI * 2);
+      previewCtx.stroke();
+    } else if (item.type === "arrow") {
+      const a = points[0], b = points[1];
+      const ax = a.x * sx, ay = a.y * sy, bx = b.x * sx, by = b.y * sy;
+      previewCtx.moveTo(ax, ay); previewCtx.lineTo(bx, by); previewCtx.stroke();
+      const angle = Math.atan2(by - ay, bx - ax), head = 10 * sx;
+      previewCtx.beginPath();
+      previewCtx.moveTo(bx, by);
+      previewCtx.lineTo(bx - head * Math.cos(angle - Math.PI / 6), by - head * Math.sin(angle - Math.PI / 6));
+      previewCtx.lineTo(bx - head * Math.cos(angle + Math.PI / 6), by - head * Math.sin(angle + Math.PI / 6));
+      previewCtx.closePath(); previewCtx.fill();
+    } else if (item.type === "text") {
+      previewCtx.font = `${item.size * sy}px "Segoe UI Variable Text", "Segoe UI", sans-serif`;
+      previewCtx.textBaseline = "top";
+      previewCtx.fillText(item.text, points[0].x * sx, points[0].y * sy);
+    }
+    if (i === selectedAnnotation && i < annotations.length) {
+      const p = points[0];
+      if (p) {
+        previewCtx.save();
+        previewCtx.setLineDash([5 * sx, 4 * sx]);
+        previewCtx.strokeStyle = "rgba(255,255,255,.85)";
+        previewCtx.lineWidth = Math.max(1, sx);
+        previewCtx.strokeRect(p.x * sx - 5 * sx, p.y * sy - 5 * sy, 10 * sx, 10 * sy);
+        previewCtx.restore();
+      }
+    }
+  }
+}
+
+async function loadPreview() {
+  if (rect.w < MIN || rect.h < MIN) return;
+  const request = ++previewRequest;
+  previewImage = null;
+  preview.style.visibility = "hidden";
+  try {
+    const data = await invoke("get_capture_preview", {
+      x: rect.x, y: rect.y, w: rect.w, h: rect.h
+    });
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = data;
+    });
+    if (request === previewRequest) {
+      previewImage = image;
+      preview.width = image.naturalWidth;
+      preview.height = image.naturalHeight;
+      preview.style.visibility = "visible";
+      drawAnnotations();
+    }
+  } catch (e) {
+    if (request === previewRequest) showError("Aperçu impossible : " + e);
+  }
+}
+
+async function loadFrozenScreen() {
+  const request = ++frozenRequest;
+  frozen.style.display = "none";
+  try {
+    const data = await invoke("get_capture_preview", {
+      x: 0, y: 0, w: window.innerWidth, h: window.innerHeight
+    });
+    if (request !== frozenRequest) return;
+    frozen.onload = () => {
+      if (request === frozenRequest) frozen.style.display = "block";
+    };
+    frozen.src = data;
+  } catch (e) {
+    if (request === frozenRequest) showError("Capture figée impossible : " + e);
+  }
+}
+
+function drawPoint(e) {
+  return { x: Math.max(0, Math.min(rect.w, e.clientX - rect.x)),
+    y: Math.max(0, Math.min(rect.h, e.clientY - rect.y)) };
+}
+
+/// Place le rectangle, l'étiquette de taille et les boutons.
+///
+/// Les boutons basculent de l'autre côté quand ils sortiraient de l'écran :
+/// une sélection collée au bord haut garde sa croix, à l'intérieur.
+function render() {
+  sel.style.left = rect.x + "px";
+  sel.style.top = rect.y + "px";
+  sel.style.width = rect.w + "px";
+  sel.style.height = rect.h + "px";
+  preview.style.left = rect.x + "px";
+  preview.style.top = rect.y + "px";
+  preview.style.width = rect.w + "px";
+  preview.style.height = rect.h + "px";
+  preview.style.display = rect.w && rect.h ? "block" : "none";
+  drawAnnotations();
+
+  if (mode !== "adjust") return;
+
+  const th = tools.offsetHeight;
+  let ty = rect.y + rect.h + GAP;
+  if (ty + th > window.innerHeight) ty = rect.y - th - GAP;
+  if (ty < 0) ty = Math.max(0, rect.y + rect.h - th - GAP);
+  const tw = tools.offsetWidth;
+  const toolsX = Math.min(window.innerWidth - tw - 8, Math.max(8, rect.x));
+  tools.style.left = Math.max(0, toolsX) + "px";
+  tools.style.top = ty + "px";
+
+  const toolbarBelow = ty >= rect.y + rect.h;
+  const ch = closeBtn.offsetHeight, cw = closeBtn.offsetWidth;
+  const closeX = Math.min(window.innerWidth - cw, Math.max(0, rect.x + rect.w - cw));
+  const closeY = toolbarBelow ? rect.y - ch - GAP : rect.y + rect.h + GAP;
+  closeBtn.style.left = closeX + "px";
+  closeBtn.style.top = Math.min(window.innerHeight - ch, Math.max(0, closeY)) + "px";
+
+  size.textContent = Math.round(rect.w) + " × " + Math.round(rect.h);
+  size.style.left = Math.max(0, Math.min(window.innerWidth - size.offsetWidth, rect.x)) + "px";
+  const sizeAbove = rect.y - size.offsetHeight - 6;
+  const sizeY = toolbarBelow && sizeAbove >= 0
+    ? sizeAbove
+    : rect.y + 6;
+  size.style.top = Math.min(window.innerHeight - size.offsetHeight, Math.max(0, sizeY)) + "px";
+}
+
+function setMode(next) {
+  mode = next;
+  document.body.classList.toggle("adjust", next === "adjust");
+  dim.style.display = next === "idle" ? "block" : "none";
+  sel.style.display = next === "idle" ? "none" : "block";
+  size.style.display = next === "idle" ? "none" : "block";
+}
+
+function showError(text) {
+  msg.textContent = text;
+  msg.style.display = "block";
+  msg.style.left = (rect.x + rect.w / 2) + "px";
+  msg.style.top = (rect.y + rect.h / 2) + "px";
+}
+
+function reset() {
+  gesture = null;
+  annotationGesture = null;
+  annotations = [];
+  history = [];
+  redoHistory = [];
+  selectedAnnotation = -1;
+  previewImage = null;
+  frozenRequest++;
+  frozen.removeAttribute("src");
+  frozen.style.display = "none";
+  previewCtx.clearRect(0, 0, preview.width, preview.height);
+  preview.style.display = "none";
+  preview.style.visibility = "visible";
+  textEditor.style.display = "none";
+  setTool("select");
+  msg.style.display = "none";
+  rect = { x: 0, y: 0, w: 0, h: 0 };
+  setMode("idle");
+}
+
+// L'overlay n'est jamais détruit, seulement caché puis réaffiché. Sans cette
+// remise à zéro, la sélection précédente réapparaîtrait à l'ouverture
+// suivante — et le fondu, joué une seule fois au chargement de la page, ne
+// rejouerait jamais.
+window.addEventListener("focus", () => {
+  reset();
+  loadFrozenScreen();
+  // Retirer la classe puis forcer un recalcul de style avant de la remettre :
+  // sans cette lecture, le navigateur regroupe les deux changements et
+  // l'animation ne repart pas.
+  dim.classList.remove("arriving");
+  void dim.offsetWidth;
+  dim.classList.add("arriving");
+});
+
+function setTool(next) {
+  tool = next;
+  for (const button of document.querySelectorAll("[data-tool]")) {
+    button.classList.toggle("active", button.dataset.tool === next);
+  }
+  document.body.style.cursor = next === "select" ? "crosshair" : "crosshair";
+}
+
+function recordAnnotation(item) {
+  history.push(JSON.parse(JSON.stringify(annotations)));
+  annotations.push(item);
+  redoHistory = [];
+  selectedAnnotation = annotations.length - 1;
+  drawAnnotations();
+}
+
+function openTextEditor(point) {
+  pendingText = point;
+  textEditor.value = "";
+  textEditor.style.left = (rect.x + point.x) + "px";
+  textEditor.style.top = (rect.y + point.y) + "px";
+  textEditor.style.fontSize = fontSize.value + "px";
+  textEditor.style.display = "block";
+  textEditor.focus();
+}
+
+function commitText() {
+  if (!pendingText) return;
+  const text = textEditor.value.trim();
+  if (text) recordAnnotation({
+    type: "text", points: [pendingText], text,
+    color: color.value, size: Number(fontSize.value)
+  });
+  pendingText = null;
+  textEditor.style.display = "none";
+}
+
+function undo() {
+  if (!history.length) return;
+  redoHistory.push(JSON.parse(JSON.stringify(annotations)));
+  annotations = history.pop();
+  selectedAnnotation = -1;
+  drawAnnotations();
+}
+
+function redo() {
+  if (!redoHistory.length) return;
+  history.push(JSON.parse(JSON.stringify(annotations)));
+  annotations = redoHistory.pop();
+  selectedAnnotation = -1;
+  drawAnnotations();
+}
+
+function finishAnnotation(point) {
+  const start = annotationGesture.start;
+  if (Math.abs(point.x - start.x) < MIN && Math.abs(point.y - start.y) < MIN) return;
+  const item = {
+    type: annotationGesture.type,
+    points: annotationGesture.type === "freehand" ? annotationGesture.points : [start, point],
+    color: color.value,
+    width: Number(stroke.value)
+  };
+  recordAnnotation(item);
+}
+
+function annotationHit(point) {
+  const margin = 8;
+  for (let index = annotations.length - 1; index >= 0; index--) {
+    const item = annotations[index];
+    const points = item.points || [];
+    if (!points.length) continue;
+    const xs = points.map((p) => p.x);
+    const ys = points.map((p) => p.y);
+    const left = Math.min(...xs) - margin;
+    const right = Math.max(...xs) + margin;
+    const top = Math.min(...ys) - margin;
+    const bottom = Math.max(...ys) + margin;
+    if (point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) return index;
+  }
+  return -1;
+}
+
+function moveAnnotation(point) {
+  const dx = point.x - annotationGesture.start.x;
+  const dy = point.y - annotationGesture.start.y;
+  const item = annotations[annotationGesture.index];
+  item.points = annotationGesture.originalPoints.map((original) => ({
+    x: Math.max(0, Math.min(rect.w, original.x + dx)),
+    y: Math.max(0, Math.min(rect.h, original.y + dy))
+  }));
+}
+
+function inside(e) {
+  return e.clientX >= rect.x && e.clientX <= rect.x + rect.w &&
+         e.clientY >= rect.y && e.clientY <= rect.y + rect.h;
+}
+
+window.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  // Les boutons ne doivent pas démarrer un tracé.
+  if (e.target.closest("#tools, #close, #textEditor")) return;
+
+  if (mode === "adjust" && tool !== "select" && inside(e)) {
+    const point = drawPoint(e);
+    if (tool === "text") {
+      openTextEditor(point);
+    } else {
+      annotationGesture = { type: tool, start: point, current: point, points: [point] };
+    }
+    e.preventDefault();
+    return;
+  }
+
+  const handle = e.target.closest(".h");
+  if (mode === "adjust" && tool === "select" && inside(e) && !handle) {
+    const point = drawPoint(e);
+    const index = annotationHit(point);
+    selectedAnnotation = index;
+    if (index >= 0) {
+      annotationGesture = {
+        type: "moveAnnotation",
+        index,
+        start: point,
+        originalPoints: JSON.parse(JSON.stringify(annotations[index].points)),
+        before: JSON.parse(JSON.stringify(annotations))
+      };
+    }
+    drawAnnotations();
+    e.preventDefault();
+    return;
+  }
+
+  const orig = { ...rect };
+
+  if (handle && mode === "adjust") {
+    previewImage = null;
+    preview.style.visibility = "hidden";
+    gesture = { kind: "resize", dir: handle.dataset.dir, ox: e.clientX, oy: e.clientY, orig };
+  } else if (mode === "adjust" && inside(e)) {
+    gesture = { kind: "move", ox: e.clientX, oy: e.clientY, orig };
+  } else {
+    // Tracer ailleurs repart de zéro, y compris depuis le mode ajustement.
+    gesture = { kind: "new", ox: e.clientX, oy: e.clientY, orig };
+    rect = { x: e.clientX, y: e.clientY, w: 0, h: 0 };
+    setMode("drag");
+  }
+  e.preventDefault();
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (annotationGesture) {
+    const point = drawPoint(e);
+    if (annotationGesture.type === "moveAnnotation") moveAnnotation(point);
+    else {
+      if (annotationGesture.type === "freehand") annotationGesture.points.push(point);
+      annotationGesture.current = point;
+    }
+    drawAnnotations();
+    return;
+  }
+  if (!gesture) return;
+  const dx = e.clientX - gesture.ox, dy = e.clientY - gesture.oy;
+  const o = gesture.orig;
+
+  if (gesture.kind === "new") {
+    rect = norm(gesture.ox, gesture.oy, e.clientX, e.clientY);
+  } else if (gesture.kind === "move") {
+    const W = window.innerWidth, H = window.innerHeight;
+    rect = {
+      x: Math.max(0, Math.min(o.x + dx, W - o.w)),
+      y: Math.max(0, Math.min(o.y + dy, H - o.h)),
+      w: o.w, h: o.h,
+    };
+  } else {
+    // Redimensionnement : seules les arêtes nommées par la poignée bougent.
+    // norm() gère le retournement quand on tire une arête au-delà de
+    // l'opposée.
+    const d = gesture.dir;
+    let l = o.x, t = o.y, r = o.x + o.w, b = o.y + o.h;
+    if (d.includes("w")) l = o.x + dx;
+    if (d.includes("e")) r = o.x + o.w + dx;
+    if (d.includes("n")) t = o.y + dy;
+    if (d.includes("s")) b = o.y + o.h + dy;
+    rect = clamp(norm(l, t, r, b));
+  }
+  render();
+});
+
+window.addEventListener("mouseup", () => {
+  if (annotationGesture) {
+    if (annotationGesture.type === "moveAnnotation") {
+      const item = annotations[annotationGesture.index];
+      const moved = JSON.stringify(item.points) !== JSON.stringify(annotationGesture.originalPoints);
+      if (moved) {
+        history.push(annotationGesture.before);
+        redoHistory = [];
+      }
+      annotationGesture = null;
+      drawAnnotations();
+      return;
+    }
+    const point = annotationGesture.type === "freehand"
+      ? annotationGesture.points[annotationGesture.points.length - 1]
+      : annotationGesture.current || annotationGesture.start;
+    finishAnnotation(point);
+    annotationGesture = null;
+    return;
+  }
+  if (!gesture) return;
+  const kind = gesture.kind;
+  gesture = null;
+
+  // Un clic sans glisser n'est pas une sélection vide, c'est un renoncement.
+  if (kind === "new" && (rect.w < MIN || rect.h < MIN)) {
+    invoke("close_capture").catch(console.error);
+    return;
+  }
+  setMode("adjust");
+  render();
+  loadPreview();
+});
+
+/// En cas de succès, il n'y a rien à faire ici : le backend referme l'outil
+/// et affiche la confirmation dans sa propre fenêtre. Ne reste que l'échec,
+/// qui laisse tout en place — la capture figée n'a pas été consommée, le
+/// rectangle est toujours ajustable et réenregistrable.
+async function save() {
+  try {
+    if (!previewImage) await loadPreview();
+    if (!previewImage) throw new Error("image de capture indisponible");
+    const pngData = preview.toDataURL("image/png");
+    await invoke("save_annotated_capture", { pngData });
+  } catch (e) {
+    showError("Échec : " + e);
+  }
+}
+
+async function copy() {
+  try {
+    if (!previewImage) await loadPreview();
+    if (!previewImage) throw new Error("image de capture indisponible");
+    const pngData = preview.toDataURL("image/png");
+    await invoke("copy_annotated_capture", { pngData });
+  } catch (e) {
+    showError("Échec : " + e);
+  }
+}
+
+for (const button of document.querySelectorAll("[data-tool]")) {
+  button.addEventListener("click", () => setTool(button.dataset.tool));
+}
+document.getElementById("undo").addEventListener("click", undo);
+document.getElementById("redo").addEventListener("click", redo);
+document.getElementById("delete").addEventListener("click", () => {
+  if (selectedAnnotation >= 0) {
+    history.push(JSON.parse(JSON.stringify(annotations)));
+    annotations.splice(selectedAnnotation, 1);
+    redoHistory = [];
+    selectedAnnotation = -1;
+    drawAnnotations();
+  }
+});
+textEditor.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); commitText(); }
+  if (e.key === "Escape") {
+    pendingText = null;
+    textEditor.style.display = "none";
+  }
+});
+textEditor.addEventListener("blur", commitText);
+function adjustNumber(input, e) {
+  e.preventDefault();
+  const step = e.shiftKey ? (input === fontSize ? 10 : 5) : 1;
+  const direction = e.deltaY < 0 ? 1 : -1;
+  const min = Number(input.min), max = Number(input.max);
+  input.value = Math.max(min, Math.min(max, Number(input.value) + direction * step));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+for (const setting of document.querySelectorAll(".setting")) {
+  const input = setting.querySelector("input[type=number]");
+  setting.addEventListener("wheel", (e) => adjustNumber(input, e), { passive: false });
+  input.addEventListener("input", drawAnnotations);
+}
+document.getElementById("save").addEventListener("click", save);
+document.getElementById("copy").addEventListener("click", copy);
+closeBtn.addEventListener("click", () => invoke("close_capture").catch(console.error));
+
+window.addEventListener("keydown", (e) => {
+  if (e.target === textEditor) return;
+  if (e.key === "Escape") invoke("close_capture").catch(console.error);
+  if (e.key === "Delete" && selectedAnnotation >= 0) {
+    document.getElementById("delete").click();
+  }
+  if (e.ctrlKey && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); }
+  if (e.ctrlKey && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+});
+</script>
+</body>
+</html>
