@@ -49,6 +49,25 @@
     color: var(--fg-dim);
   }
 
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .section-heading h2 { margin-bottom: 10px; }
+  .section-action {
+    margin: -4px -7px 6px 0;
+    padding: 3px 7px;
+    border: none;
+    border-radius: 5px;
+    background: none;
+    color: var(--fg-dim);
+    font: inherit;
+    cursor: default;
+  }
+  .section-action:hover { background: var(--bg-hover); color: var(--fg); }
+  .section-action:disabled { opacity: .5; }
+
   .row { margin-bottom: 12px; }
   .row:last-child { margin-bottom: 0; }
 
@@ -177,7 +196,10 @@
 <body>
 <div id="panel">
   <section>
-    <h2>Luminosité</h2>
+    <div class="section-heading">
+      <h2>Luminosité</h2>
+      <button class="section-action" id="refresh-monitors">Refresh monitors</button>
+    </div>
     <div id="monitors"><div class="empty">Recherche des écrans…</div></div>
   </section>
 
@@ -278,6 +300,21 @@ async function renderMonitors() {
     box.append(row);
   }
 }
+
+document.getElementById("refresh-monitors").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await invoke("reload_monitors");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await renderMonitors();
+    syncHeight();
+  } catch (e) {
+    console.error("rafraîchissement des écrans", e);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 async function renderAudio() {
   const box = document.getElementById("audio");

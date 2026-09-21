@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $dest = Join-Path $env:LOCALAPPDATA "Toolbelt"
 $exe  = Join-Path $dest "toolbelt.exe"
+$env:CARGO_TARGET_DIR = Join-Path $PSScriptRoot "target"
 
 Write-Host "Compilation en release..." -ForegroundColor Cyan
 cargo build --release
