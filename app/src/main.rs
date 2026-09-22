@@ -321,6 +321,33 @@ fn close_capture(app: tauri::AppHandle, pending: tauri::State<Pending>) {
     close_overlay(&app);
 }
 
+#[derive(serde::Serialize)]
+struct HoveredWindow {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[tauri::command]
+fn get_hovered_window(
+    app: tauri::AppHandle,
+    pending: tauri::State<Pending>,
+) -> Option<HoveredWindow> {
+    let guard = pending.0.lock().ok()?;
+    let shot = guard.as_ref()?;
+    let overlay = app.get_webview_window(OVERLAY)?;
+    let overlay_hwnd = overlay.hwnd().ok()?.0 as *mut std::ffi::c_void;
+    let scale = overlay.scale_factor().ok()?;
+    let (left, top, width, height) = screenshot::hovered_window(overlay_hwnd)?;
+    Some(HoveredWindow {
+        x: (left - shot.origin_x) as f64 / scale,
+        y: (top - shot.origin_y) as f64 / scale,
+        w: width as f64 / scale,
+        h: height as f64 / scale,
+    })
+}
+
 /// Recadre la capture figée et l'écrit sur le disque.
 ///
 /// Les coordonnées viennent du frontend en pixels CSS, relatives à
@@ -779,6 +806,7 @@ fn main() {
             set_autostart,
             save_capture,
             get_capture_preview,
+            get_hovered_window,
             save_annotated_capture,
             copy_annotated_capture,
             close_capture,

@@ -47,8 +47,9 @@ pub fn file_name() -> String {
     )
 }
 
-/// `DWMWA_TRANSITIONS_FORCEDISABLED` (dwmapi.h).
+/// DWM attributes (dwmapi.h).
 const DWMWA_TRANSITIONS_FORCEDISABLED: u32 = 3;
+const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
 
 #[link(name = "dwmapi")]
 extern "system" {
@@ -56,6 +57,12 @@ extern "system" {
         hwnd: *mut std::ffi::c_void,
         dwAttribute: u32,
         pvAttribute: *const std::ffi::c_void,
+        cbAttribute: u32,
+    ) -> i32;
+    fn DwmGetWindowAttribute(
+        hwnd: *mut std::ffi::c_void,
+        dwAttribute: u32,
+        pvAttribute: *mut std::ffi::c_void,
         cbAttribute: u32,
     ) -> i32;
 }
@@ -89,7 +96,31 @@ const WS_EX_NOACTIVATE: isize = 0x0800_0000;
 extern "system" {
     fn GetWindowLongPtrW(hwnd: *mut std::ffi::c_void, nIndex: i32) -> isize;
     fn SetWindowLongPtrW(hwnd: *mut std::ffi::c_void, nIndex: i32, dwNewLong: isize) -> isize;
+    fn GetCursorPos(point: *mut POINT) -> i32;
+    fn GetWindow(hwnd: *mut std::ffi::c_void, command: u32) -> *mut std::ffi::c_void;
+    fn GetAncestor(hwnd: *mut std::ffi::c_void, flags: u32) -> *mut std::ffi::c_void;
+    fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
+    fn GetWindowRect(hwnd: *mut std::ffi::c_void, rect: *mut RECT) -> i32;
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct POINT {
+    x: i32,
+    y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RECT {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+const GA_ROOT: u32 = 2;
+const GW_HWNDNEXT: u32 = 2;
 
 /// Interdit à la fenêtre de prendre le focus, définitivement.
 ///
@@ -104,6 +135,65 @@ pub fn never_activate(hwnd: *mut std::ffi::c_void) {
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+    }
+}
+
+unsafe fn visible_window_rect(hwnd: *mut std::ffi::c_void) -> Option<RECT> {
+    let mut rect = RECT::default();
+    let result = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut rect as *mut RECT as *mut std::ffi::c_void,
+        std::mem::size_of::<RECT>() as u32,
+    );
+    if result == 0 && rect.right > rect.left && rect.bottom > rect.top {
+        Some(rect)
+    } else if GetWindowRect(hwnd, &mut rect) != 0
+        && rect.right > rect.left
+        && rect.bottom > rect.top
+    {
+        Some(rect)
+    } else {
+        None
+    }
+}
+
+/// Renvoie le rectangle de la fenêtre racine sous le curseur, en pixels écran.
+/// La fenêtre d'overlay est ignorée : elle recouvre nécessairement le point
+/// du curseur pendant la sélection.
+pub fn hovered_window(cursor_excluded: *mut std::ffi::c_void) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point) == 0 {
+            return None;
+        }
+        // L'overlay est au sommet de l'ordre Z. Parcourir les fenêtres qui le
+        // suivent permet de trouver la première fenêtre visible sous le point,
+        // alors qu'un hit-test direct ne verrait que l'overlay lui-même.
+        let mut hwnd = GetWindow(cursor_excluded, GW_HWNDNEXT);
+        while !hwnd.is_null() {
+            if IsWindowVisible(hwnd) != 0 {
+                if let Some(rect) = visible_window_rect(hwnd) {
+                    if point.x >= rect.left
+                        && point.x < rect.right
+                        && point.y >= rect.top
+                        && point.y < rect.bottom
+                    {
+                        let root = GetAncestor(hwnd, GA_ROOT);
+                        if !root.is_null() && root != cursor_excluded {
+                            return Some((
+                                rect.left,
+                                rect.top,
+                                rect.right - rect.left,
+                                rect.bottom - rect.top,
+                            ));
+                        }
+                    }
+                }
+            }
+            hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+        }
+        None
     }
 }
 

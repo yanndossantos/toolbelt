@@ -58,6 +58,27 @@
     box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
     z-index: 3;
   }
+  #windowHighlight {
+    position: fixed;
+    display: none;
+    border: 2px solid #65b7ee;
+    background: rgba(101, 183, 238, 0.12);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 0 18px rgba(101, 183, 238, 0.45);
+    pointer-events: none;
+    z-index: 2;
+  }
+  #windowHighlight::after {
+    content: "Fenêtre";
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    padding: 3px 6px;
+    border-radius: 3px;
+    background: #1769aa;
+    color: #fff;
+    font-size: 11px;
+    line-height: 1;
+  }
   body.adjust #sel { cursor: move; }
 
   /* Poignées de redimensionnement, visibles une fois le tracé terminé. */
@@ -266,6 +287,7 @@
 <body>
   <img id="frozen" alt="" />
   <div id="dim"></div>
+  <div id="windowHighlight"></div>
   <canvas id="preview"></canvas>
   <div id="sel">
     <span class="h nw" data-dir="nw"></span>
@@ -316,6 +338,7 @@
 const invoke = window.__TAURI__.core.invoke;
 const frozen = document.getElementById("frozen");
 const dim = document.getElementById("dim");
+const windowHighlight = document.getElementById("windowHighlight");
 const sel = document.getElementById("sel");
 const size = document.getElementById("size");
 const tools = document.getElementById("tools");
@@ -346,6 +369,9 @@ let pendingText = null;
 /// moment de l'appui — tout est recalculé depuis lui, jamais par
 /// accumulation, qui dériverait au fil des mousemove.
 let gesture = null;
+let hoveredWindow = null;
+let hoverRequest = 0;
+let hoverPending = false;
 
 /// Écart entre le rectangle et les boutons.
 const GAP = 8;
@@ -525,12 +551,43 @@ function render() {
   size.style.top = Math.min(window.innerHeight - size.offsetHeight, Math.max(0, sizeY)) + "px";
 }
 
+function renderWindowHighlight() {
+  if (!hoveredWindow || mode !== "idle") {
+    windowHighlight.style.display = "none";
+    return;
+  }
+  windowHighlight.style.left = hoveredWindow.x + "px";
+  windowHighlight.style.top = hoveredWindow.y + "px";
+  windowHighlight.style.width = Math.max(0, hoveredWindow.w - 4) + "px";
+  windowHighlight.style.height = Math.max(0, hoveredWindow.h - 4) + "px";
+  windowHighlight.style.display = "block";
+}
+
+async function updateHoveredWindow() {
+  if (mode !== "idle" || gesture || hoverPending) return;
+  hoverPending = true;
+  const request = ++hoverRequest;
+  try {
+    const target = await invoke("get_hovered_window");
+    if (request === hoverRequest && mode === "idle" && !gesture) {
+      hoveredWindow = target;
+      renderWindowHighlight();
+    }
+  } catch (e) {
+    hoveredWindow = null;
+    renderWindowHighlight();
+  } finally {
+    hoverPending = false;
+  }
+}
+
 function setMode(next) {
   mode = next;
   document.body.classList.toggle("adjust", next === "adjust");
   dim.style.display = next === "idle" ? "block" : "none";
   sel.style.display = next === "idle" ? "none" : "block";
   size.style.display = next === "idle" ? "none" : "block";
+  renderWindowHighlight();
 }
 
 function showError(text) {
@@ -558,6 +615,7 @@ function reset() {
   setTool("select");
   msg.style.display = "none";
   rect = { x: 0, y: 0, w: 0, h: 0 };
+  hoveredWindow = null;
   setMode("idle");
 }
 
@@ -709,6 +767,7 @@ window.addEventListener("mousedown", (e) => {
   }
 
   const orig = { ...rect };
+  const clickedWindow = mode === "idle" && hoveredWindow;
 
   if (handle && mode === "adjust") {
     previewImage = null;
@@ -721,11 +780,13 @@ window.addEventListener("mousedown", (e) => {
     gesture = { kind: "new", ox: e.clientX, oy: e.clientY, orig };
     rect = { x: e.clientX, y: e.clientY, w: 0, h: 0 };
     setMode("drag");
+    gesture.window = clickedWindow;
   }
   e.preventDefault();
 });
 
 window.addEventListener("mousemove", (e) => {
+  if (!gesture && !annotationGesture) updateHoveredWindow();
   if (annotationGesture) {
     const point = drawPoint(e);
     if (annotationGesture.type === "moveAnnotation") moveAnnotation(point);
@@ -786,11 +847,19 @@ window.addEventListener("mouseup", () => {
   }
   if (!gesture) return;
   const kind = gesture.kind;
+  const selectedWindow = gesture.window;
   gesture = null;
 
   // Un clic sans glisser n'est pas une sélection vide, c'est un renoncement.
   if (kind === "new" && (rect.w < MIN || rect.h < MIN)) {
-    invoke("close_capture").catch(console.error);
+    if (selectedWindow) {
+      rect = clamp(selectedWindow);
+      setMode("adjust");
+      render();
+      loadPreview();
+    } else {
+      invoke("close_capture").catch(console.error);
+    }
     return;
   }
   setMode("adjust");
