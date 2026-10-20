@@ -102,6 +102,10 @@ l'écran — l'overlay fait la largeur du bureau virtuel, un coin d'écran peut
   d'elle-même après 2,6 s. Elle porte un bouton **Ouvrir** qui ouvre le
   dossier des captures dans l'Explorateur ; la survoler suspend le compte à
   rebours, sinon le bouton serait souvent hors d'atteinte.
+- Le bouton **Enregistrer et ouvrir dans une fenêtre** de la barre d'outils
+  enregistre le même PNG, puis l'affiche directement dans une fenêtre séparée.
+  Cette fenêtre reste disponible pour consulter la capture sans ouvrir le
+  fichier depuis l'Explorateur.
 - **✕**, en haut à droite, ferme sans rien écrire.
 
 Après la sélection, la barre d'outils permet d'ajouter un rectangle, un
@@ -111,6 +115,9 @@ rétablissement et suppression permettent de corriger les annotations; les
 raccourcis `Ctrl+Z`, `Ctrl+Y` et `Suppr` sont également disponibles. Les
 annotations sont intégrées au PNG enregistré et les contrôles de l'overlay ne
 font pas partie de l'image.
+
+La poignée en forme de points à gauche de la barre permet de la déplacer
+librement sans déplacer la sélection.
 
 Échap ferme aussi, et un clic sans glisser vaut renoncement.
 

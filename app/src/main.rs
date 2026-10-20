@@ -21,6 +21,7 @@ use toolbelt_audio as audio;
 const FLYOUT: &str = "flyout";
 const OVERLAY: &str = "overlay";
 const TOAST: &str = "toast";
+const VIEWER: &str = "viewer";
 const TRAY: &str = "main";
 /// Taille de la confirmation, en pixels logiques. Fixe : la fenêtre est
 /// assez grande pour un chemin de longueur courante, et le texte se replie
@@ -517,6 +518,39 @@ fn persist_annotated_capture(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Enregistre la capture puis l'affiche dans la fenêtre d'aperçu dédiée.
+///
+/// Le PNG vient du même canvas que les commandes « Enregistrer » et
+/// « Copier » : les annotations et le rendu visibles par l'utilisateur sont
+/// donc exactement ceux qui sont persistés et affichés.
+#[tauri::command]
+fn save_and_show_capture(
+    app: tauri::AppHandle,
+    pending: tauri::State<Pending>,
+    png_data: String,
+) -> Result<String, String> {
+    let path = persist_annotated_capture(&app, &pending, &png_data, false)?;
+    show_capture_viewer(&app, &png_data);
+    Ok(path)
+}
+
+fn show_capture_viewer(app: &tauri::AppHandle, png_data: &str) {
+    let Ok(json) = serde_json::to_string(png_data) else {
+        eprintln!("aperçu : données PNG impossibles à sérialiser");
+        return;
+    };
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(win) = handle.get_webview_window(VIEWER) else {
+            eprintln!("aperçu : fenêtre introuvable");
+            return;
+        };
+        let _ = win.eval(&format!("window.showCapture({json})"));
+        let _ = win.show();
+        let _ = win.set_focus();
+    });
+}
+
 /// Message d'erreur si le raccourci n'a pas pu être enregistré, pour le pied
 /// du flyout. `None` quand tout va bien.
 #[tauri::command]
@@ -809,6 +843,7 @@ fn main() {
             get_hovered_window,
             save_annotated_capture,
             copy_annotated_capture,
+            save_and_show_capture,
             close_capture,
             hide_toast,
             get_hotkey_error,
@@ -908,6 +943,28 @@ fn main() {
             if let Ok(hwnd) = toast.hwnd() {
                 screenshot::never_activate(hwnd.0 as *mut std::ffi::c_void);
             }
+
+            // Aperçu de la dernière capture. La fenêtre est gardée en vie
+            // pour que le bouton de la barre d'outils reste instantané entre
+            // deux captures. Fermer la fenêtre la masque afin qu'elle puisse
+            // être réutilisée au prochain clic.
+            let viewer =
+                WebviewWindowBuilder::new(app, VIEWER, WebviewUrl::App("viewer.html".into()))
+                    .title("Capture")
+                    .inner_size(900.0, 650.0)
+                    .min_inner_size(320.0, 240.0)
+                    .resizable(true)
+                    .always_on_top(false)
+                    .skip_taskbar(false)
+                    .visible(false)
+                    .build()?;
+            let viewer_to_hide = viewer.clone();
+            viewer.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = viewer_to_hide.hide();
+                }
+            });
 
             let hotkey_handle = app.handle().clone();
             if let Err(e) = hotkey::spawn(move || begin_capture(&hotkey_handle)) {
